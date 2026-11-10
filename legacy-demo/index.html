@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CodeAssist offline multi-agent code generation and testing demo">
+  <title>CodeAssist — Multi-Agent Coding Demo</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-icon">C</span><span>CodeAssist<small>AGENT WORKSPACE</small></span></a><span class="mode"><i></i> OFFLINE DEMO</span></header>
+  <main class="shell">
+    <section class="hero"><div><p class="eyebrow">MULTI-AGENT CODE WORKFLOW</p><h1>Build, test, <em>improve.</em></h1><p class="subhead">See how specialized roles can turn a programming task into a checked result.</p></div><div class="steps"><span>01 Understand</span><b>→</b><span>02 Generate</span><b>→</b><span>03 Verify</span><b>→</b><span>04 Review</span></div></section>
+    <section class="notice"><span class="notice-icon">i</span><p><strong>Offline local prototype.</strong> No API key required. This demo uses fixed logic for five sample tasks; it does not call an LLM.</p></section>
+    <div class="layout">
+      <section class="card task-card">
+        <div class="card-heading"><div><p class="eyebrow">START A TASK</p><h2>What should the program do?</h2></div><span class="count">5 SAMPLE TASKS</span></div>
+        <label for="taskSelect">Choose a supported example</label><select id="taskSelect"></select>
+        <div class="task-description" id="taskDescription"></div>
+        <label for="codeEditor">Python workspace <span class="label-hint">You can edit the sample before running it</span></label>
+        <textarea id="codeEditor" spellcheck="false" aria-label="Python code editor"></textarea>
+        <div class="editor-foot"><span>Python · sample input included</span><button id="runButton" class="primary">Run workflow <span>→</span></button></div>
+        <div id="errorBox" class="error" role="alert" hidden></div>
+      </section>
+      <aside class="card agents-card"><div class="card-heading"><div><p class="eyebrow">SPECIALIZED ROLES</p><h2>Four agents, one workflow</h2></div></div>
+        <div class="agent" id="agent-requirement"><span class="agent-no">01</span><div><strong>Requirement Agent</strong><small>Structures inputs, steps, and outputs</small></div><span class="agent-state">READY</span></div>
+        <div class="agent" id="agent-coding"><span class="agent-no">02</span><div><strong>Coding Agent</strong><small>Creates or repairs the Python solution</small></div><span class="agent-state">READY</span></div>
+        <div class="agent" id="agent-testing"><span class="agent-no">03</span><div><strong>Testing Agent</strong><small>Runs the sample check with a timeout</small></div><span class="agent-state">READY</span></div>
+        <div class="agent" id="agent-review"><span class="agent-no">04</span><div><strong>Review Agent</strong><small>Summarizes result and bounded repair</small></div><span class="agent-state">READY</span></div>
+        <div class="agent-note">A role is a specialized step in the controller workflow. The offline version uses local demo logic, not four separate AI models.</div>
+      </aside>
+    </div>
+    <section class="card results" id="results" hidden>
+      <div class="result-head"><div><p class="eyebrow">TASK RESULT</p><h2 id="resultTitle">Workflow complete</h2></div><span id="resultBadge" class="badge">PASSED</span></div>
+      <div class="result-grid"><div><h3>Requirement analysis</h3><ul id="requirements"></ul></div><div><h3>Test run</h3><div id="testResult"></div></div></div>
+      <h3>Agent activity</h3><ol id="timeline" class="timeline"></ol>
+      <div class="result-code"><h3>Final code</h3><pre><code id="finalCode"></code></pre></div>
+      <p class="result-note" id="resultNotice"></p>
+    </section>
+    <footer><span>CodeAssist · Multi-Agent AI Approach to Automated Code Generation and Testing</span><span>Local demonstration · v1.0</span></footer>
+  </main>
+  <script src="/app.js" defer></script>
+</body></html>

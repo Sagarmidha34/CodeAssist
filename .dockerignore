@@ -1,0 +1,9 @@
+.git
+.next
+node_modules
+legacy-demo
+outputs
+work
+.env*
+!.env.example
+npm-debug.log*
