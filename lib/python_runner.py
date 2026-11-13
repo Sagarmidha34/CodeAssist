@@ -21,9 +21,14 @@ SAFE_BUILTINS = {
     "sorted": sorted, "reversed": reversed,
     "enumerate": enumerate, "zip": zip, "map": map, "list": list, "tuple": tuple,
     "set": set, "all": all, "any": any,
+    "Exception": Exception, "ArithmeticError": ArithmeticError,
+    "ValueError": ValueError, "TypeError": TypeError,
+    "IndexError": IndexError, "KeyError": KeyError,
+    "ZeroDivisionError": ZeroDivisionError, "RuntimeError": RuntimeError,
 }
 ALLOWED = (
-    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For, ast.Attribute,
+    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For, ast.Try,
+    ast.ExceptHandler, ast.Raise, ast.Attribute,
     ast.Break, ast.Continue, ast.Pass, ast.FunctionDef, ast.Return,
     ast.arguments, ast.arg, ast.Name, ast.Load, ast.Store, ast.Constant,
     ast.List, ast.Tuple, ast.Dict, ast.Set, ast.Subscript, ast.Slice,
