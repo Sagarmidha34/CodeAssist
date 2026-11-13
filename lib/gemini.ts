@@ -154,8 +154,10 @@ function groqSchema(value: unknown): unknown {
   return normalized;
 }
 
-function groqMessages(messages: GeminiMessage[], instructions: string, hasStructuredResponse = false) {
-  const schemaHint = hasStructuredResponse ? " Return only the JSON object requested by the structured response format, with no Markdown." : "";
+function groqMessages(messages: GeminiMessage[], instructions: string, responseSchema?: GeminiJsonSchema, jsonObjectMode = false) {
+  const schemaHint = responseSchema
+    ? ` Return only a valid JSON object matching this schema${jsonObjectMode ? "" : " exactly"}, with no Markdown or extra text: ${JSON.stringify(groqSchema(responseSchema))}`
+    : "";
   return [
     { role: "system", content: `${instructions}${schemaHint}` },
     ...messages.map(message => ({ role: message.role === "model" ? "assistant" : "user", content: message.text })),
@@ -163,29 +165,39 @@ function groqMessages(messages: GeminiMessage[], instructions: string, hasStruct
 }
 
 async function requestAlternate(provider: AlternateProvider, messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+  const send = (jsonObjectMode = false) => fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
     body: JSON.stringify({
       model: provider.model,
-      messages: groqMessages(messages, instructions, Boolean(responseSchema)),
+      messages: groqMessages(messages, instructions, responseSchema, jsonObjectMode),
       [provider.maxTokensField]: maxOutputTokens,
       temperature: responseSchema ? 0.1 : 0.3,
       ...(responseSchema ? {
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "codeassist_response",
-            strict: true,
-            schema: groqSchema(responseSchema),
-          },
-        },
+        response_format: jsonObjectMode
+          ? { type: "json_object" }
+          : {
+              type: "json_schema",
+              json_schema: {
+                name: "codeassist_response",
+                strict: true,
+                schema: groqSchema(responseSchema),
+              },
+            },
       } : {}),
       ...(streaming ? { stream: true } : {}),
     }),
     signal: AbortSignal.timeout(90_000),
     cache: "no-store",
   });
+  let response = await send();
+  if (!response.ok && responseSchema && !streaming && response.status === 400) {
+    // Some OpenAI-compatible providers/models reject strict JSON Schema mode.
+    // Retry once using JSON Object Mode; the schema is also included in the
+    // system prompt and the caller still validates the parsed result.
+    try { await response.clone().body?.cancel(); } catch { /* release response if possible */ }
+    response = await send(true);
+  }
   if (response.ok) return response;
   let detail = "";
   let failedGeneration = false;
@@ -194,7 +206,7 @@ async function requestAlternate(provider: AlternateProvider, messages: GeminiMes
     detail = payload.error?.message?.slice(0, 240) || "";
     failedGeneration = payload.error?.failed_generation !== undefined;
   } catch { /* provider error body is optional */ }
-  if (failedGeneration) throw new Error(`${provider.label} rejected the structured response. Confirm this model supports strict JSON Schema output.`);
+  if (failedGeneration) throw new Error(`${provider.label} rejected both strict-schema and JSON-object response modes. Check that this model supports JSON output.`);
   throw new Error(detail ? `${provider.label} request failed (${response.status}): ${detail}` : `${provider.label} request failed (${response.status}). Check its key, model and usage limits.`);
 }
 
