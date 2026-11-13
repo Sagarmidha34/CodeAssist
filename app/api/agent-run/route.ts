@@ -185,7 +185,11 @@ export async function POST(request: Request) {
     async start(controller) {
       const encoder = new TextEncoder();
       const emit = (event: string, data: unknown) => controller.enqueue(encoder.encode(sse(event, data)));
-      const stage = (agent: string, status: "running" | "complete" | "failed", detail: string) => emit("agent", { agent, status, detail });
+      let activeAgent: string | null = null;
+      const stage = (agent: string, status: "running" | "complete" | "failed", detail: string) => {
+        activeAgent = status === "running" ? agent : activeAgent === agent ? null : activeAgent;
+        emit("agent", { agent, status, detail });
+      };
       let finalText = "";
       try {
         stage("Requirement Agent", "running", "Structuring the task and identifying acceptance requirements.");
@@ -203,7 +207,7 @@ export async function POST(request: Request) {
         code = code.replace(/^```(?:python)?\s*/i, "").replace(/\s*```$/, "").trim();
         stage("Coding Agent", "complete", "Initial Python solution is ready for test execution.");
 
-        stage("Testing Agent", "running", "Creating edge-case checks, then running them in the restricted Python runner.");
+        stage("Testing Agent", "running", "Preparing up to five edge-case checks with the AI (time-limited request).");
         const testsJson = await callAgent(
           "You are the Testing Agent. Prepare up to five LeetCode-style black-box test cases for this task. Follow the stated input/output formats exactly. Cover representative normal behavior and useful boundary/edge cases, without inventing requirements. For every case provide: name, a one-sentence purpose, initialValues as a compact valid JSON string describing the input objects/arrays/scalars before execution (use {} only when there truly are no structured values), stdin as the exact complete text sent to the program, and expected as the exact stdout after trimming. The initialValues and stdin must describe the same case. Compute expected output independently from the task definition; never copy or guess candidate output. Do not include explanation or Markdown in expected. Return only valid JSON with key tests containing objects with name, purpose, initialValues, stdin, expected. Do not modify or execute code.",
           `Task: ${requirement}\nRequirements:\n${spec.requirements.map(item => `- ${item}`).join("\n")}\n${ioContract}\nCandidate code:\n${code}`, 2200, testSchema);
@@ -216,6 +220,7 @@ export async function POST(request: Request) {
           stdin: typeof test.stdin === "string" ? test.stdin.slice(0, 2_000) : "",
           expected: typeof test.expected === "string" ? test.expected.slice(0, 1_000).trim() : "",
         }));
+        stage("Testing Agent", "running", `Running ${tests.length} generated checks in the restricted Python runner.`);
         const deploymentOrigin = new URL(request.url).origin;
         const cookies = request.headers.get("cookie") || "";
         let results = await runTests(code, tests, deploymentOrigin, cookies);
@@ -230,7 +235,7 @@ export async function POST(request: Request) {
           code = await callAgent("You are the Coding Agent repairing code after concrete test feedback. Fix the reported problems while preserving the task. The restricted runner blocks imports, attributes, file access, and network. Return Python code only.", repairPrompt, 2000);
           code = code.replace(/^```(?:python)?\s*/i, "").replace(/\s*```$/, "").trim();
           stage("Coding Agent", "complete", "The bounded repair is ready; no additional repair will be attempted.");
-          stage("Testing Agent", "running", "Re-running the same tests against the repaired code.");
+          stage("Testing Agent", "running", `Re-running ${tests.length} checks against the repaired code.`);
           results = await runTests(code, tests, deploymentOrigin, cookies);
           stage("Testing Agent", "complete", `Repair run: ${results.filter(result => result.passed).length} of ${results.length} checks passed${results.every(result => result.passed) ? "." : "; remaining failures are shown below."}`);
         }
@@ -251,6 +256,7 @@ export async function POST(request: Request) {
         controller.close();
       } catch (err) {
         const message = err instanceof Error ? err.message : "The agent workflow could not finish.";
+        if (activeAgent) stage(activeAgent, "failed", message);
         emit("error", { message }); controller.close();
       }
     },

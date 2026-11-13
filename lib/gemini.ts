@@ -36,24 +36,27 @@ function requestBody(messages: GeminiMessage[], instructions: string, maxOutputT
   };
 }
 
-async function request(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
+async function request(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema, timeoutMs = 90_000) {
   const { apiKey, model } = config();
   const method = streaming ? "streamGenerateContent?alt=sse" : "generateContent";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${method}`;
   const body = JSON.stringify(requestBody(messages, instructions, maxOutputTokens, model, responseSchema));
 
+  const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new GeminiUnavailableError("Gemini did not respond before the request time limit. Trying the alternate model.");
     let response: Response;
     try {
       response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
         body,
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(remainingMs),
         cache: "no-store",
       });
     } catch {
-      if (attempt < 2) { await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1))); continue; }
+      if (attempt < 2 && Date.now() + 400 * (attempt + 1) < deadline) { await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1))); continue; }
       throw new GeminiUnavailableError("Gemini could not be reached. Trying the alternate model.");
     }
     if (response.ok) return response;
@@ -77,7 +80,7 @@ async function request(messages: GeminiMessage[], instructions: string, maxOutpu
           : response.status === 503 ? 750 * (attempt + 1) : 1_000 * (attempt + 1);
       // Only retry short, temporary limits. A long wait should be shown to the user
       // instead of holding a serverless request open or repeatedly spending quota.
-      if (retryMs <= 5_000) {
+      if (retryMs <= 3_000 && Date.now() + retryMs < deadline) {
         await new Promise(resolve => setTimeout(resolve, retryMs));
         continue;
       }
@@ -164,7 +167,8 @@ function groqMessages(messages: GeminiMessage[], instructions: string, responseS
   ];
 }
 
-async function requestAlternate(provider: AlternateProvider, messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
+async function requestAlternate(provider: AlternateProvider, messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema, deadline = Date.now() + 90_000) {
+  const remainingMs = () => Math.max(1, deadline - Date.now());
   const send = (jsonObjectMode = false) => fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
@@ -187,7 +191,7 @@ async function requestAlternate(provider: AlternateProvider, messages: GeminiMes
       } : {}),
       ...(streaming ? { stream: true } : {}),
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(remainingMs()),
     cache: "no-store",
   });
   let response = await send();
@@ -210,29 +214,36 @@ async function requestAlternate(provider: AlternateProvider, messages: GeminiMes
   throw new Error(detail ? `${provider.label} request failed (${response.status}): ${detail}` : `${provider.label} request failed (${response.status}). Check its key, model and usage limits.`);
 }
 
-async function requestAlternateChain(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
+async function requestAlternateChain(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema, timeoutMs = 90_000) {
   const providers = alternateProviders();
   if (!providers.length) throw new Error("Gemini is unavailable and no alternate AI provider is configured. Add a fallback API key, model and base URL in the server environment.");
 
   const failures: string[] = [];
+  const deadline = Date.now() + timeoutMs;
   for (const provider of providers) {
-    try { return await requestAlternate(provider, messages, instructions, maxOutputTokens, streaming, responseSchema); }
+    if (Date.now() >= deadline) break;
+    try { return await requestAlternate(provider, messages, instructions, maxOutputTokens, streaming, responseSchema, deadline); }
     catch (error) { failures.push(error instanceof Error ? error.message : `${provider.label} request failed.`); }
   }
-  throw new Error(`Gemini is unavailable, and all configured alternate models failed. ${failures.join(" | ")}`);
+  const reason = failures.length ? failures.join(" | ") : "The alternate-provider time limit was reached.";
+  throw new Error(`Gemini is unavailable, and the alternate models could not respond in time. ${reason}`);
 }
 
 function textFromCandidate(payload: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }> }) {
   return payload.candidates?.[0]?.content?.parts?.map(part => part.text || "").join("") || "";
 }
 
-export async function generateGeminiText(instructions: string, prompt: string, maxOutputTokens = 1800, responseSchema?: GeminiJsonSchema) {
+export async function generateGeminiText(instructions: string, prompt: string, maxOutputTokens = 1800, responseSchema?: GeminiJsonSchema, timeoutMs = 25_000) {
   let response: Response;
+  const deadline = Date.now() + timeoutMs;
+  const primaryTimeoutMs = Math.max(1_000, Math.floor(timeoutMs * 0.6));
   try {
-    response = await request([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema);
+    response = await request([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema, primaryTimeoutMs);
   } catch (error) {
     if (!canUseAlternateProvider(error)) throw error;
-    response = await requestAlternateChain([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error("The AI request timed out before an alternate model could respond. Please try again.");
+    response = await requestAlternateChain([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema, remainingMs);
   }
   const payload = await response.json() as Parameters<typeof textFromCandidate>[0];
   const text = ("candidates" in payload
