@@ -10,6 +10,7 @@ import io
 import json
 import resource
 import sys
+from types import SimpleNamespace
 
 MAX_SOURCE = 12_000
 MAX_INPUT = 2_000
@@ -39,7 +40,7 @@ ALLOWED = (
     ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Starred, ast.NamedExpr,
     ast.List, ast.Tuple, ast.Dict, ast.Set, ast.Subscript, ast.Slice,
     ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp, ast.Call,
-    ast.keyword, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
+    ast.keyword, ast.Import, ast.alias, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
     ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift,
     ast.USub, ast.UAdd, ast.Invert, ast.Not, ast.And, ast.Or,
     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In,
@@ -55,6 +56,16 @@ SAFE_METHODS = {
     "sort", "split", "splitlines", "startswith", "strip", "symmetric_difference",
     "union", "upper", "update", "values",
 }
+SAFE_JSON_FUNCTIONS = {"loads", "dumps"}
+SAFE_JSON = SimpleNamespace(loads=json.loads, dumps=json.dumps)
+
+def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Expose only JSON parsing/serialization to submitted programs."""
+    if name != "json" or level != 0 or fromlist:
+        raise ImportError("Only `import json` is available; other imports are blocked.")
+    return SAFE_JSON
+
+SAFE_BUILTINS["__import__"] = safe_import
 
 def apply_limits():
     def limit_soft(resource_id, target):
@@ -93,9 +104,16 @@ def run(source, input_text):
             if isinstance(node, ast.Call):
                 is_safe_name = isinstance(node.func, ast.Name) and (node.func.id in SAFE_BUILTINS or node.func.id in functions)
                 is_safe_method = isinstance(node.func, ast.Attribute) and node.func.attr in SAFE_METHODS
-                if not is_safe_name and not is_safe_method:
-                    raise ValueError("Only basic built-ins and functions defined in this file may be called.")
-            if isinstance(node, ast.Attribute) and node.attr not in SAFE_METHODS:
+                is_safe_json_call = (
+                    isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "json"
+                    and node.func.attr in SAFE_JSON_FUNCTIONS
+                )
+                if not is_safe_name and not is_safe_method and not is_safe_json_call:
+                    called = node.func.id if isinstance(node.func, ast.Name) else ast.unparse(node.func)
+                    raise ValueError(f"Blocked function call: {called}.")
+            if isinstance(node, ast.Attribute) and node.attr not in SAFE_METHODS | SAFE_JSON_FUNCTIONS:
                 raise ValueError("Only approved string and list methods may be accessed.")
             if isinstance(node, ast.Name) and node.id.startswith("__") and node.id != "__name__":
                 raise ValueError("Names beginning with double underscores are blocked.")
