@@ -55,7 +55,10 @@ The local environment file is ignored by Git. After changing it, restart the loc
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Browser/server Supabase client; RLS remains required | No |
 | `NEXT_PUBLIC_SITE_URL` | Canonical app origin used for auth callbacks (for example `https://your-production-domain.vercel.app`) | No |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-only database writes and private operations | **Yes** |
-| `GEMINI_API_KEY` | Server-only Gemini API requests | **Yes** |
+| `GEMINI_API_KEY` | Primary Gemini API key (slot 1) — rotates to next key on quota/rate-limit | **Yes** |
+| `GEMINI_API_KEY_2` | Gemini key slot 2 (optional, different Google account) | **Yes** |
+| `GEMINI_API_KEY_3` | Gemini key slot 3 (optional, different Google account) | **Yes** |
+| `GEMINI_API_KEY_4` | Gemini key slot 4 (optional, different Google account) | **Yes** |
 | `GEMINI_MODEL` | Gemini model name; defaults to `gemini-3-flash-preview` | No |
 | `GROQ_API_KEY` | Optional server-only Groq fallback for Gemini quota/rate limits or temporary outages | **Yes** |
 | `GROQ_MODEL` | Optional Groq chat model; defaults to `openai/gpt-oss-20b` | No |

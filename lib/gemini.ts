@@ -14,12 +14,32 @@ function canUseAlternateProvider(error: unknown) {
 
 export const CODEASSIST_INSTRUCTIONS = `You are CodeAssist, a careful programming assistant. Explain your reasoning clearly, provide correct and runnable code, mention important assumptions, and call out risks. Prefer concise answers. Never claim code was executed unless the restricted test runner actually ran it.`;
 
+// --- Gemini API key rotation pool ---
+// Supports GEMINI_API_KEY (slot 1) through GEMINI_API_KEY_4.
+// A module-level counter advances on every 429 / quota error so the next
+// request starts from the next key. This persists for the lifetime of the
+// serverless instance and therefore distributes load across all configured
+// keys without any external state.
+let _geminiKeyIndex = 0;
+
+function geminiKeyPool(): string[] {
+  const keys: string[] = [];
+  const primary = process.env.GEMINI_API_KEY?.trim();
+  if (primary) keys.push(primary);
+  for (let slot = 2; slot <= 4; slot++) {
+    const k = process.env[`GEMINI_API_KEY_${slot}`]?.trim();
+    if (k) keys.push(k);
+  }
+  if (!keys.length) throw new Error("Add GEMINI_API_KEY to the server environment to enable Gemini responses.");
+  return keys;
+}
+
 function config() {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error("Add GEMINI_API_KEY to the server environment to enable Gemini responses.");
+  const keys = geminiKeyPool();
+  const apiKey = keys[_geminiKeyIndex % keys.length];
   const model = process.env.GEMINI_MODEL?.trim() || "gemini-3-flash-preview";
   if (!/^[a-zA-Z0-9._-]+$/.test(model)) throw new Error("GEMINI_MODEL contains invalid characters.");
-  return { apiKey, model };
+  return { apiKey, model, poolSize: keys.length };
 }
 
 function requestBody(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, model: string, responseSchema?: GeminiJsonSchema) {
@@ -36,13 +56,13 @@ function requestBody(messages: GeminiMessage[], instructions: string, maxOutputT
   };
 }
 
-async function request(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema, timeoutMs = 90_000) {
-  const { apiKey, model } = config();
+async function requestWithKey(apiKey: string, model: string, messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema: GeminiJsonSchema | undefined, deadline: number): Promise<Response | null> {
+  // Returns the Response on success, null if this key is rate-limited / quota-exhausted
+  // (caller should rotate to the next key), or throws for hard errors.
   const method = streaming ? "streamGenerateContent?alt=sse" : "generateContent";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${method}`;
   const body = JSON.stringify(requestBody(messages, instructions, maxOutputTokens, model, responseSchema));
 
-  const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new GeminiUnavailableError("Gemini did not respond before the request time limit. Trying the alternate model.");
@@ -68,7 +88,8 @@ async function request(messages: GeminiMessage[], instructions: string, maxOutpu
     const dailyQuota = /per[\s_-]*day|daily|day[\s_-]*limit|requests[\s_-]*per[\s_-]*day/i.test(quotaText);
     const transientRateLimit = response.status === 429 && /rate[\s_-]*limit|per[\s_-]*minute|per[\s_-]*second|tokens[\s_-]*per/i.test(quotaText);
 
-    if (dailyQuota) throw new GeminiQuotaError("Gemini's daily quota for this project is exhausted.");
+    // Daily quota exhausted → signal caller to try next key
+    if (dailyQuota) return null;
 
     if (attempt < 2 && (response.status === 503 || transientRateLimit)) {
       const retryInfo = payload.error?.details?.find(item => item["@type"]?.endsWith("RetryInfo"))?.retryDelay;
@@ -86,15 +107,35 @@ async function request(messages: GeminiMessage[], instructions: string, maxOutpu
       }
     }
 
-    if (response.status === 429) {
-      throw new GeminiQuotaError("Gemini quota or rate limit reached for this project.");
-    }
+    // Transient rate-limit → signal caller to rotate to next key immediately
+    if (response.status === 429) return null;
     if ([500, 502, 503, 504].includes(response.status)) {
       throw new GeminiUnavailableError("Gemini is temporarily unavailable. Trying the alternate model.");
     }
     throw new Error(detail ? `Gemini request failed (${response.status}): ${detail}` : `Gemini request failed (${response.status}). Check the API key, model and quota.`);
   }
-  throw new Error("Gemini is temporarily rate-limited. Please wait a moment and try again.");
+  // All retry attempts exhausted for this key → rotate
+  return null;
+}
+
+async function request(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema, timeoutMs = 90_000) {
+  const { model, poolSize } = config();
+  const keys = geminiKeyPool();
+  const deadline = Date.now() + timeoutMs;
+
+  // Try each key in the pool starting from the current rotation index.
+  for (let attempt = 0; attempt < poolSize; attempt++) {
+    const keyIndex = _geminiKeyIndex % poolSize;
+    const apiKey = keys[keyIndex];
+    const response = await requestWithKey(apiKey, model, messages, instructions, maxOutputTokens, streaming, responseSchema, deadline);
+    if (response !== null) return response;
+    // This key is exhausted/rate-limited — advance the rotation and try the next one.
+    _geminiKeyIndex = (keyIndex + 1) % poolSize;
+    if (Date.now() >= deadline) break;
+  }
+
+  // All Gemini keys are exhausted or rate-limited.
+  throw new GeminiQuotaError(`All ${poolSize} Gemini API key(s) are quota-limited or rate-limited. Trying alternate provider.`);
 }
 
 type AlternateProvider = { label: string; apiKey: string; model: string; baseUrl: string; maxTokensField: "max_tokens" | "max_completion_tokens" };
