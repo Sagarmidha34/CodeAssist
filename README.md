@@ -44,7 +44,7 @@ The local environment file is ignored by Git. After changing it, restart the loc
 
 1. Push the repository to GitHub and import it into Vercel as a Next.js project with the repository root as the Root Directory.
 2. Add the required Supabase and Gemini environment variables listed above to Vercel. `SUPABASE_SERVICE_ROLE_KEY` is used only server-side and also authenticates the private Python runner request; do not expose it with a `NEXT_PUBLIC_` name.
-3. Vercel detects `api/python_runner.py` as a Python Function and uses Python 3.12 from `.python-version`. The Next.js agent route calls this function server-to-server; the Python function rejects requests without the server secret. No Python binary install step or extra API key is needed in Vercel.
+3. Vercel detects `api/python_runner.py` as a Python Function and uses Python 3.12 from `.python-version`. The Next.js agent route calls this function on the same deployment origin and forwards the authenticated request cookies, so Vercel Deployment Protection can authorize the internal request. If the project has Protection Bypass for Automation enabled, its system secret is also forwarded automatically. The Python function still requires the server-only Supabase role key. No Python binary install step or extra model API key is needed in Vercel.
 4. Deploy, then run an Agents task and confirm the Test results table contains actual outputs rather than “Python is not installed.” Check the Vercel function logs if the runner reports a configuration or invocation error.
 
 ### Environment variables

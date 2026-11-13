@@ -52,7 +52,7 @@ function jsonFrom(text: string) {
     throw new Error("Gemini returned invalid structured data. Please retry the agent task.");
   }
 }
-async function python(source: string, input: string): Promise<{ ok: boolean; stdout: string; error: string }> {
+async function python(source: string, input: string, deploymentOrigin: string, cookies: string): Promise<{ ok: boolean; stdout: string; error: string }> {
   if (activePythonRuns >= MAX_CONCURRENT_PYTHON_RUNS) {
     return { ok: false, stdout: "", error: "The code runner is busy. Please try again in a moment." };
   }
@@ -60,13 +60,19 @@ async function python(source: string, input: string): Promise<{ ok: boolean; std
   try {
     if (process.env.VERCEL) {
       const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
-      const deploymentHost = process.env.VERCEL_URL;
-      if (!secret || !deploymentHost) {
+      if (!secret || !deploymentOrigin) {
         return { ok: false, stdout: "", error: "The secure Python function is not configured for this deployment." };
       }
-      const response = await fetch(`https://${deploymentHost}/api/python_runner`, {
+      const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `Bearer ${secret}` };
+      // Reuse the request's deployment origin and cookies so Vercel Deployment Protection
+      // sees the same authenticated deployment access as the browser request.
+      if (cookies) headers.Cookie = cookies;
+      if (process.env.VERCEL_AUTOMATION_BYPASS_SECRET) {
+        headers["x-vercel-protection-bypass"] = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+      }
+      const response = await fetch(`${deploymentOrigin}/api/python_runner`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        headers,
         body: JSON.stringify({ code: source, input }),
         cache: "no-store",
         signal: AbortSignal.timeout(5_000),
@@ -210,7 +216,9 @@ export async function POST(request: Request) {
           stdin: typeof test.stdin === "string" ? test.stdin.slice(0, 2_000) : "",
           expected: typeof test.expected === "string" ? test.expected.slice(0, 1_000).trim() : "",
         }));
-        let results = await runTests(code, tests);
+        const deploymentOrigin = new URL(request.url).origin;
+        const cookies = request.headers.get("cookie") || "";
+        let results = await runTests(code, tests, deploymentOrigin, cookies);
         stage("Testing Agent", "complete", results.every(result => result.passed) ? `All ${results.length} generated checks passed.` : `${results.filter(result => result.passed).length} of ${results.length} checks passed; the code needs repair.`);
         let repairUsed = false;
         if (results.some(result => !result.passed)) {
@@ -223,7 +231,7 @@ export async function POST(request: Request) {
           code = code.replace(/^```(?:python)?\s*/i, "").replace(/\s*```$/, "").trim();
           stage("Coding Agent", "complete", "The bounded repair is ready; no additional repair will be attempted.");
           stage("Testing Agent", "running", "Re-running the same tests against the repaired code.");
-          results = await runTests(code, tests);
+          results = await runTests(code, tests, deploymentOrigin, cookies);
           stage("Testing Agent", "complete", `Repair run: ${results.filter(result => result.passed).length} of ${results.length} checks passed${results.every(result => result.passed) ? "." : "; remaining failures are shown below."}`);
         }
 
@@ -250,10 +258,10 @@ export async function POST(request: Request) {
   return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "private, no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
 }
 
-async function runTests(code: string, tests: TestCase[]): Promise<TestResult[]> {
+async function runTests(code: string, tests: TestCase[], deploymentOrigin: string, cookies: string): Promise<TestResult[]> {
   const results: TestResult[] = [];
   for (const test of tests) {
-    const execution = await python(code, test.stdin);
+    const execution = await python(code, test.stdin, deploymentOrigin, cookies);
     results.push({ ...test, received: execution.stdout, error: execution.error, passed: execution.ok && execution.stdout === test.expected.trim() });
   }
   return results;
