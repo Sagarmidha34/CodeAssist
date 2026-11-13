@@ -10,12 +10,22 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-type TestCase = { name: string; stdin: string; expected: string };
+type TestCase = { name: string; purpose: string; initialValues: string; stdin: string; expected: string };
 type TestResult = TestCase & { received: string; passed: boolean; error: string };
 let activePythonRuns = 0;
 const MAX_CONCURRENT_PYTHON_RUNS = 4;
 
 function sse(event: string, data: unknown) { return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }
+function displayText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+function initialValuesText(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "{}";
+  try { return JSON.stringify(JSON.parse(value), null, 2); }
+  catch { return JSON.stringify({ description: value.trim() }, null, 2); }
+}
 function jsonFrom(text: string) {
   const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try { return JSON.parse(cleaned); }
@@ -61,11 +71,11 @@ async function python(source: string, input: string): Promise<{ ok: boolean; std
         cache: "no-store",
         signal: AbortSignal.timeout(5_000),
       });
-      const result = await response.json().catch(() => null) as { ok?: boolean; stdout?: string; error?: string } | null;
+      const result = await response.json().catch(() => null) as { ok?: unknown; stdout?: unknown; error?: unknown } | null;
       if (!response.ok || !result || typeof result.ok !== "boolean") {
-        return { ok: false, stdout: "", error: result?.error || `Python function returned an invalid response (${response.status}).` };
+        return { ok: false, stdout: "", error: displayText(result?.error) || `Python function returned an invalid response (${response.status}).` };
       }
-      return { ok: result.ok, stdout: result.stdout || "", error: result.error || "" };
+      return { ok: result.ok, stdout: displayText(result.stdout), error: displayText(result.error) };
     }
 
     return await new Promise(resolve => {
@@ -118,10 +128,12 @@ const testSchema: GeminiJsonSchema = {
         type: "OBJECT",
         properties: {
           name: { type: "STRING" },
+          purpose: { type: "STRING" },
+          initialValues: { type: "STRING" },
           stdin: { type: "STRING" },
           expected: { type: "STRING" },
         },
-        required: ["name", "stdin", "expected"],
+        required: ["name", "purpose", "initialValues", "stdin", "expected"],
       },
     },
   },
@@ -187,12 +199,14 @@ export async function POST(request: Request) {
 
         stage("Testing Agent", "running", "Creating edge-case checks, then running them in the restricted Python runner.");
         const testsJson = await callAgent(
-          "You are the Testing Agent. Create three or fewer valid black-box tests from the task, requirements, and candidate code. Follow the stated input/output formats exactly. Compute each expected output from the task definition, not by copying or guessing what the candidate code prints. Expected output must contain only program stdout (no explanation or Markdown). Use exact stdin text and exact stdout after trimming. Include normal and edge cases where meaningful. Return only valid JSON with key tests, an array of objects with name, stdin, expected. Do not modify or execute the code.",
-          `Task: ${requirement}\nRequirements:\n${spec.requirements.map(item => `- ${item}`).join("\n")}\n${ioContract}\nCandidate code:\n${code}`, 1500, testSchema);
+          "You are the Testing Agent. Prepare up to five LeetCode-style black-box test cases for this task. Follow the stated input/output formats exactly. Cover representative normal behavior and useful boundary/edge cases, without inventing requirements. For every case provide: name, a one-sentence purpose, initialValues as a compact valid JSON string describing the input objects/arrays/scalars before execution (use {} only when there truly are no structured values), stdin as the exact complete text sent to the program, and expected as the exact stdout after trimming. The initialValues and stdin must describe the same case. Compute expected output independently from the task definition; never copy or guess candidate output. Do not include explanation or Markdown in expected. Return only valid JSON with key tests containing objects with name, purpose, initialValues, stdin, expected. Do not modify or execute code.",
+          `Task: ${requirement}\nRequirements:\n${spec.requirements.map(item => `- ${item}`).join("\n")}\n${ioContract}\nCandidate code:\n${code}`, 2200, testSchema);
         const testPlan = jsonFrom(testsJson) as { tests?: TestCase[] };
         if (!Array.isArray(testPlan.tests) || testPlan.tests.length === 0) throw new Error("Testing Agent did not provide any usable tests.");
-        const tests: TestCase[] = testPlan.tests.slice(0, 3).map((test, index) => ({
+        const tests: TestCase[] = testPlan.tests.slice(0, 5).map((test, index) => ({
           name: typeof test.name === "string" ? test.name.slice(0, 80) : `Case ${index + 1}`,
+          purpose: typeof test.purpose === "string" ? test.purpose.slice(0, 240) : "Checks the required behavior for this input.",
+          initialValues: initialValuesText(test.initialValues).slice(0, 2_000),
           stdin: typeof test.stdin === "string" ? test.stdin.slice(0, 2_000) : "",
           expected: typeof test.expected === "string" ? test.expected.slice(0, 1_000).trim() : "",
         }));
@@ -220,8 +234,8 @@ export async function POST(request: Request) {
 
         const passed = results.filter(result => result.passed).length;
         const tableCell = (value: string) => value.replaceAll("|", "\\|").replace(/\r?\n/g, " ↵ ").replace(/\s{2,}/g, " ");
-        const testTable = results.map(result => `| ${result.passed ? "Pass" : "Fail"} | ${tableCell(result.name)} | ${tableCell(result.expected)} | ${tableCell(result.error ? `ERROR: ${result.error}` : result.received)} |`).join("\n");
-        finalText = `### Requirement analysis\n${(spec.requirements || []).map(item => `- ${item}`).join("\n")}\n\n### Test results (${passed}/${results.length} passed)\n| Status | Test | Expected | Actual |\n|---|---|---|---|\n${testTable}\n\n### Review\n${review}\n\n${repairUsed ? "One repair attempt was used." : "No repair was needed."}\n\n### Python solution\n\`\`\`python\n${code}\n\`\`\``;
+        const testCases = results.map((result, index) => `#### ${index + 1}. ${tableCell(result.name)} — ${result.passed ? "PASS" : "FAIL"}\n${result.purpose}\n\n**Initial values**\n\n\`\`\`json\n${result.initialValues}\n\`\`\`\n\n**Input (stdin)**\n\n\`\`\`text\n${result.stdin || "(empty input)"}\n\`\`\`\n\n**Expected output**\n\n\`\`\`text\n${result.expected || "(empty output)"}\n\`\`\`\n\n**Actual output**\n\n\`\`\`text\n${result.error ? `Runner error: ${displayText(result.error)}` : result.received || "(empty output)"}\n\`\`\``).join("\n\n");
+        finalText = `### Requirement analysis\n${(spec.requirements || []).map(item => `- ${item}`).join("\n")}\n\n### Test cases (${passed}/${results.length} passed)\n${testCases}\n\n### Review\n${review}\n\n${repairUsed ? "One repair attempt was used." : "No repair was needed."}\n\n### Python solution\n\`\`\`python\n${code}\n\`\`\``;
         const { error: saveError } = await admin.from("messages").insert({ conversation_id: conversationId, user_id: user.id, role: "assistant", content: finalText });
         if (saveError) throw new Error("The workflow completed, but its result could not be saved.");
         emit("delta", { text: finalText });
