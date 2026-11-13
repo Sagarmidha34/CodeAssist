@@ -10,7 +10,7 @@ CodeAssist is an authenticated coding workspace using Supabase for accounts and 
 - Gemini API calls made server-side. The browser never receives provider keys.
 - Optional Groq fallback for chat and agent requests when Gemini returns an exhausted quota or rate-limit response. This is a separate provider with its own account, pricing, and usage limits; it does not bypass either provider's limits.
 - Chat history is stored in Supabase and sent as recent context with each model request; CodeAssist does not create a separate provider-side conversation object.
-- An Agents mode with Requirement, Coding, Testing, and Review roles. It asks the Testing Agent for up to five Python tests, runs them through a restricted local subprocess, and allows at most one repair attempt.
+- An Agents mode with Requirement, Coding, Testing, and Review roles. It asks the Testing Agent for up to five Python tests, runs them through a restricted subprocess, and allows at most one repair attempt. On Vercel, execution uses a private Python Function; locally, it uses the installed Python 3 interpreter.
 - Request size limits, 8,000-character task limit, 30 requests per user per day, 100 requests across the app per day, and basic same-origin protections.
 
 The default model is `gemini-3-flash-preview`. Gemini API free-tier model access and request quotas vary and can change. Check the current [Gemini API pricing and free-tier details](https://ai.google.dev/gemini-api/docs/pricing). Google indicates free-tier content may be used to improve its products; do not send secrets or sensitive code unless that data handling is acceptable for your project.
@@ -39,6 +39,13 @@ Requires Node.js 20.9+, Python 3.11+, and npm.
 6. Open <http://127.0.0.1:3000>.
 
 The local environment file is ignored by Git. After changing it, restart the local server if the app does not pick up the changes.
+
+### Deploy to Vercel
+
+1. Push the repository to GitHub and import it into Vercel as a Next.js project with the repository root as the Root Directory.
+2. Add the required Supabase and Gemini environment variables listed above to Vercel. `SUPABASE_SERVICE_ROLE_KEY` is used only server-side and also authenticates the private Python runner request; do not expose it with a `NEXT_PUBLIC_` name.
+3. Vercel detects `api/python_runner.py` as a Python Function and uses Python 3.12 from `.python-version`. The Next.js agent route calls this function server-to-server; the Python function rejects requests without the server secret. No Python binary install step or extra API key is needed in Vercel.
+4. Deploy, then run an Agents task and confirm the Test results table contains actual outputs rather than “Python is not installed.” Check the Vercel function logs if the runner reports a configuration or invocation error.
 
 ### Environment variables
 

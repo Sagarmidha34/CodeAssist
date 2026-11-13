@@ -19,7 +19,7 @@ SAFE_BUILTINS = {
     "str": str, "bool": bool, "len": len, "sum": sum, "min": min,
     "max": max, "range": range, "abs": abs, "round": round,
     "sorted": sorted, "reversed": reversed,
-    "enumerate": enumerate, "zip": zip, "list": list, "tuple": tuple,
+    "enumerate": enumerate, "zip": zip, "map": map, "list": list, "tuple": tuple,
     "set": set, "all": all, "any": any,
 }
 ALLOWED = (
@@ -98,7 +98,7 @@ def run(source, input_text):
 def main():
     try:
         apply_limits()
-        payload = json.loads(sys.stdin.read(16_000))
+        payload = json.loads(sys.stdin.read(100_000))
         result = run(payload.get("code", ""), payload.get("input", ""))
     except BaseException as exc:
         result = {"ok": False, "stdout": "", "error": f"Runner error: {type(exc).__name__}: {exc}"[:400]}

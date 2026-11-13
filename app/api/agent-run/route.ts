@@ -42,31 +42,56 @@ function jsonFrom(text: string) {
     throw new Error("Gemini returned invalid structured data. Please retry the agent task.");
   }
 }
-function python(source: string, input: string): Promise<{ ok: boolean; stdout: string; error: string }> {
-  return new Promise(resolve => {
-    if (activePythonRuns >= MAX_CONCURRENT_PYTHON_RUNS) {
-      resolve({ ok: false, stdout: "", error: "The code runner is busy. Please try again in a moment." });
-      return;
+async function python(source: string, input: string): Promise<{ ok: boolean; stdout: string; error: string }> {
+  if (activePythonRuns >= MAX_CONCURRENT_PYTHON_RUNS) {
+    return { ok: false, stdout: "", error: "The code runner is busy. Please try again in a moment." };
+  }
+  activePythonRuns += 1;
+  try {
+    if (process.env.VERCEL) {
+      const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const deploymentHost = process.env.VERCEL_URL;
+      if (!secret || !deploymentHost) {
+        return { ok: false, stdout: "", error: "The secure Python function is not configured for this deployment." };
+      }
+      const response = await fetch(`https://${deploymentHost}/api/python_runner`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+        body: JSON.stringify({ code: source, input }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(5_000),
+      });
+      const result = await response.json().catch(() => null) as { ok?: boolean; stdout?: string; error?: string } | null;
+      if (!response.ok || !result || typeof result.ok !== "boolean") {
+        return { ok: false, stdout: "", error: result?.error || `Python function returned an invalid response (${response.status}).` };
+      }
+      return { ok: result.ok, stdout: result.stdout || "", error: result.error || "" };
     }
-    activePythonRuns += 1;
-    const child = spawn(/* turbopackIgnore: true */ "python3", ["-I", "-S", join(process.cwd(), "lib", "python_runner.py")], {
-      cwd: process.cwd(), env: { NODE_ENV: process.env.NODE_ENV || "production", PATH: process.env.PATH || "/usr/bin:/bin", PYTHONIOENCODING: "utf-8" }, stdio: ["pipe", "pipe", "ignore"] as const,
+
+    return await new Promise(resolve => {
+      const child = spawn(/* turbopackIgnore: true */ "python3", ["-I", "-S", join(process.cwd(), "lib", "python_runner.py")], {
+        cwd: process.cwd(), env: { NODE_ENV: process.env.NODE_ENV || "production", PATH: process.env.PATH || "/usr/bin:/bin", PYTHONIOENCODING: "utf-8" }, stdio: ["pipe", "pipe", "ignore"] as const,
+      });
+      let stdout = ""; let settled = false;
+      const finish = (result: { ok: boolean; stdout: string; error: string }) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+      const timer = setTimeout(() => { child.kill("SIGKILL"); finish({ ok: false, stdout: "", error: "Execution exceeded the 3.5 second limit." }); }, 3500);
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", chunk => { stdout += chunk; if (stdout.length > 8_000) { child.kill("SIGKILL"); finish({ ok: false, stdout: "", error: "Runner response exceeded its output limit." }); } });
+      child.on("error", () => finish({ ok: false, stdout: "", error: "Python is not installed in this local environment." }));
+      child.on("close", code => {
+        if (settled) return;
+        try {
+          const result = JSON.parse(stdout) as { ok: boolean; stdout: string; error: string };
+          finish(result);
+        } catch { finish({ ok: false, stdout: "", error: code === null ? "Python execution stopped unexpectedly." : "Python runner returned an invalid result." }); }
+      });
+      child.stdin.end(JSON.stringify({ code: source, input }));
     });
-    let stdout = ""; let settled = false;
-    const finish = (result: { ok: boolean; stdout: string; error: string }) => { if (!settled) { settled = true; activePythonRuns -= 1; clearTimeout(timer); resolve(result); } };
-    const timer = setTimeout(() => { child.kill("SIGKILL"); finish({ ok: false, stdout: "", error: "Execution exceeded the 3.5 second limit." }); }, 3500);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", chunk => { stdout += chunk; if (stdout.length > 8_000) { child.kill("SIGKILL"); finish({ ok: false, stdout: "", error: "Runner response exceeded its output limit." }); } });
-    child.on("error", () => finish({ ok: false, stdout: "", error: "Python is not installed in this deployment. Add Python 3.11+ to the app container." }));
-    child.on("close", code => {
-      if (settled) return;
-      try {
-        const result = JSON.parse(stdout) as { ok: boolean; stdout: string; error: string };
-        finish(result);
-      } catch { finish({ ok: false, stdout: "", error: code === null ? "Python execution stopped unexpectedly." : "Python runner returned an invalid result." }); }
-    });
-    child.stdin.end(JSON.stringify({ code: source, input }));
-  });
+  } catch (error) {
+    return { ok: false, stdout: "", error: error instanceof Error && error.name === "TimeoutError" ? "Python execution exceeded the 5 second deployment limit." : "Could not reach the secure Python function." };
+  } finally {
+    activePythonRuns -= 1;
+  }
 }
 
 async function callAgent(instructions: string, input: string, tokens = 1800, responseSchema?: GeminiJsonSchema) {
