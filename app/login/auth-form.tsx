@@ -6,6 +6,11 @@ import Link from "next/link";
 import { ArrowRight, Code2, LoaderCircle, LockKeyhole, Mail } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
+function getAuthRedirectBase() {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  return (configured || window.location.origin).replace(/\/+$/, "");
+}
+
 export function AuthForm({ configured, confirmationError = false, initialMode = "signin" }: { configured: boolean; confirmationError?: boolean; initialMode?: "signin" | "signup" }) {
   const router = useRouter();
   const [mode, setMode] = useState<"signin" | "signup" | "reset">(initialMode);
@@ -49,12 +54,13 @@ export function AuthForm({ configured, confirmationError = false, initialMode = 
         if (password !== confirmPassword) throw new Error("The passwords don’t match.");
       }
       const supabase = createClient();
+      const redirectBase = getAuthRedirectBase();
       if (mode === "reset") {
-        const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: `${window.location.origin}/auth/reset` });
+        const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: `${redirectBase}/auth/reset` });
         if (error) throw error;
         setNotice("If an account exists for that email, a password reset link is on its way.");
       } else if (mode === "signup") {
-        const { data, error } = await supabase.auth.signUp({ email: normalizedEmail, password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm` } });
+        const { data, error } = await supabase.auth.signUp({ email: normalizedEmail, password, options: { emailRedirectTo: `${redirectBase}/auth/confirm` } });
         if (error) throw error;
         if (!data.session) {
           setAwaitingConfirmation(true);
@@ -77,7 +83,7 @@ export function AuthForm({ configured, confirmationError = false, initialMode = 
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
-        options: { redirectTo: `${window.location.origin}/auth/confirm` },
+        options: { redirectTo: `${getAuthRedirectBase()}/auth/confirm` },
       });
       if (error) throw error;
     } catch (err) {
@@ -118,7 +124,7 @@ export function AuthForm({ configured, confirmationError = false, initialMode = 
         {mode !== "reset" ? <p className="auth-switch">{mode === "signin" ? "New to CodeAssist?" : "Already have an account?"} <Link href={mode === "signin" ? "/signup" : "/login"}>{mode === "signin" ? "Create an account" : "Sign in"}</Link></p> : <p className="auth-switch"><button onClick={() => { setMode("signin"); setError(""); setNotice(""); }}>Back to sign in</button></p>}
       </>}
       <div className="auth-divider"><span /> <span>BUILT FOR THE WAY YOU THINK</span> <span /></div>
-      <p className="auth-footnote">Your conversations are saved to your account. Gemini generates responses through Google AI Studio.</p>
+      <p className="auth-footnote">Your conversations are saved to your account. AI responses use the configured server-side provider.</p>
     </section>
     <div className="auth-bottom">CODEASSIST <span>·</span> A MULTI-AGENT AI CODING WORKSPACE</div>
   </main>;
