@@ -262,7 +262,29 @@ async function runTests(code: string, tests: TestCase[], deploymentOrigin: strin
   const results: TestResult[] = [];
   for (const test of tests) {
     const execution = await python(code, test.stdin, deploymentOrigin, cookies);
-    results.push({ ...test, received: execution.stdout, error: execution.error, passed: execution.ok && execution.stdout === test.expected.trim() });
+    results.push({ ...test, received: execution.stdout, error: execution.error, passed: execution.ok && outputsMatch(execution.stdout, test.expected) });
   }
   return results;
+}
+
+function normalizedOutput(value: string) {
+  return value.replace(/\r\n?/g, "\n").trim().split(/\s+/).filter(Boolean).join(" ");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function outputsMatch(actual: string, expected: string) {
+  if (normalizedOutput(actual) === normalizedOutput(expected)) return true;
+  try {
+    return stableJson(JSON.parse(actual)) === stableJson(JSON.parse(expected));
+  } catch {
+    return false;
+  }
 }
