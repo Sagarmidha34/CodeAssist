@@ -95,9 +95,11 @@ def run(source, input_text):
                     raise ValueError("Only basic built-ins and functions defined in this file may be called.")
             if isinstance(node, ast.Attribute) and node.attr not in SAFE_METHODS:
                 raise ValueError("Only approved string and list methods may be accessed.")
-            if isinstance(node, ast.Name) and node.id.startswith("__"):
+            if isinstance(node, ast.Name) and node.id.startswith("__") and node.id != "__name__":
                 raise ValueError("Names beginning with double underscores are blocked.")
-        safe_globals = {"__builtins__": SAFE_BUILTINS}
+        # `__name__` is needed for the standard script entry-point guard. Other
+        # dunder names stay blocked to prevent access to Python internals.
+        safe_globals = {"__builtins__": SAFE_BUILTINS, "__name__": "__main__"}
         captured = LimitedOutput()
         old_stdin = sys.stdin
         sys.stdin = io.StringIO(input_text)
