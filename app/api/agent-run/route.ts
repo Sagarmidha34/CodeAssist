@@ -78,8 +78,10 @@ const requirementSchema: GeminiJsonSchema = {
   properties: {
     summary: { type: "STRING" },
     requirements: { type: "ARRAY", items: { type: "STRING" } },
+    inputFormat: { type: "STRING" },
+    outputFormat: { type: "STRING" },
   },
-  required: ["summary", "requirements"],
+  required: ["summary", "requirements", "inputFormat", "outputFormat"],
 };
 
 const testSchema: GeminiJsonSchema = {
@@ -145,31 +147,32 @@ export async function POST(request: Request) {
       try {
         stage("Requirement Agent", "running", "Structuring the task and identifying acceptance requirements.");
         const requirementJson = await callAgent(
-          "You are the Requirement Agent. Convert the user's programming task into a concise, unambiguous specification. Return only valid JSON with keys: summary (string), requirements (array of strings). Do not invent requirements that are not implied; state assumptions in requirements. Do not write code or tests.",
+          "You are the Requirement Agent. Convert the user's programming task into a concise, unambiguous specification. Return only valid JSON with keys: summary (string), requirements (array of strings), inputFormat (string), outputFormat (string). If the user did not specify a command-line interface, make a simple reasonable assumption and clearly state it in requirements and the format fields. Ensure the input and output formats are mutually consistent. Do not write code or tests.",
           requirement, 1600, requirementSchema);
-        const spec = jsonFrom(requirementJson) as { summary?: string; requirements?: string[] };
-        if (!Array.isArray(spec.requirements) || spec.requirements.length === 0) throw new Error("Requirement Agent did not provide a usable specification.");
+        const spec = jsonFrom(requirementJson) as { summary?: string; requirements?: string[]; inputFormat?: string; outputFormat?: string };
+        if (!Array.isArray(spec.requirements) || spec.requirements.length === 0 || !spec.inputFormat?.trim() || !spec.outputFormat?.trim()) throw new Error("Requirement Agent did not provide a usable specification and I/O format.");
         stage("Requirement Agent", "complete", `${spec.requirements.length} requirement points prepared.`);
 
         stage("Coding Agent", "running", "Generating a Python solution from the structured requirement.");
-        const codePrompt = `Programming task:\n${requirement}\n\nStructured requirement:\n${(spec.requirements || []).map(item => `- ${item}`).join("\n")}\n\nWrite a complete Python 3 program that reads input from standard input and writes the answer to standard output. Do not import modules. Avoid attributes and file access. Return code only, without Markdown fences.`;
-        let code = await callAgent("You are the Coding Agent. Write correct, readable Python code that follows the task exactly. The code runs in a small restricted interpreter: no imports, file access, network, attributes, or third-party packages. Use only basic built-ins, loops, conditionals, and functions. Return only Python code.", codePrompt, 2000);
+        const ioContract = `Input format (follow exactly): ${spec.inputFormat}\nOutput format (follow exactly): ${spec.outputFormat}`;
+        const codePrompt = `Programming task:\n${requirement}\n\nStructured requirement:\n${(spec.requirements || []).map(item => `- ${item}`).join("\n")}\n\n${ioContract}\n\nWrite a complete runnable Python 3 program. If the user asked for a function, define that function and include a small command-line interface that follows the input/output format above. Do not import modules. Avoid attributes and file access. Return code only, without Markdown fences.`;
+        let code = await callAgent("You are the Coding Agent. Write correct, readable, runnable Python 3 code that follows the task, requirements, and exact input/output contract. If asked for a function, implement the function and a small stdin/stdout driver. The restricted interpreter blocks imports, file access, network, attribute access, and third-party packages. Use basic built-ins, loops, conditionals, and functions only. Return Python code only.", codePrompt, 2000);
         code = code.replace(/^```(?:python)?\s*/i, "").replace(/\s*```$/, "").trim();
         stage("Coding Agent", "complete", "Initial Python solution is ready for test execution.");
 
         stage("Testing Agent", "running", "Creating edge-case checks, then running them in the restricted Python runner.");
         const testsJson = await callAgent(
-          "You are the Testing Agent. Based on the task, structured requirements, and candidate Python code, create a small black-box test suite. Return only valid JSON with key tests: an array of up to 5 objects with name, stdin, expected. stdin is exact standard input text; expected is exact standard output after trimming. Include normal and edge cases when the requirements justify them. Do not modify or execute the code.",
-          `Task: ${requirement}\nRequirements:\n${spec.requirements.map(item => `- ${item}`).join("\n")}\nCandidate code:\n${code}`, 1500, testSchema);
+          "You are the Testing Agent. Create three or fewer valid black-box tests from the task, requirements, and candidate code. Follow the stated input/output formats exactly. Compute each expected output from the task definition, not by copying or guessing what the candidate code prints. Expected output must contain only program stdout (no explanation or Markdown). Use exact stdin text and exact stdout after trimming. Include normal and edge cases where meaningful. Return only valid JSON with key tests, an array of objects with name, stdin, expected. Do not modify or execute the code.",
+          `Task: ${requirement}\nRequirements:\n${spec.requirements.map(item => `- ${item}`).join("\n")}\n${ioContract}\nCandidate code:\n${code}`, 1500, testSchema);
         const testPlan = jsonFrom(testsJson) as { tests?: TestCase[] };
         if (!Array.isArray(testPlan.tests) || testPlan.tests.length === 0) throw new Error("Testing Agent did not provide any usable tests.");
-        const tests: TestCase[] = testPlan.tests.slice(0, 5).map((test, index) => ({
+        const tests: TestCase[] = testPlan.tests.slice(0, 3).map((test, index) => ({
           name: typeof test.name === "string" ? test.name.slice(0, 80) : `Case ${index + 1}`,
           stdin: typeof test.stdin === "string" ? test.stdin.slice(0, 2_000) : "",
           expected: typeof test.expected === "string" ? test.expected.slice(0, 1_000).trim() : "",
         }));
         let results = await runTests(code, tests);
-        stage("Testing Agent", results.every(result => result.passed) ? "complete" : "failed", `${results.filter(result => result.passed).length} of ${results.length} generated checks passed.`);
+        stage("Testing Agent", "complete", results.every(result => result.passed) ? `All ${results.length} generated checks passed.` : `${results.filter(result => result.passed).length} of ${results.length} checks passed; the code needs repair.`);
         let repairUsed = false;
         if (results.some(result => !result.passed)) {
           repairUsed = true;
@@ -182,7 +185,7 @@ export async function POST(request: Request) {
           stage("Coding Agent", "complete", "The bounded repair is ready; no additional repair will be attempted.");
           stage("Testing Agent", "running", "Re-running the same tests against the repaired code.");
           results = await runTests(code, tests);
-          stage("Testing Agent", results.every(result => result.passed) ? "complete" : "failed", `Repair run: ${results.filter(result => result.passed).length} of ${results.length} checks passed.`);
+          stage("Testing Agent", "complete", `Repair run: ${results.filter(result => result.passed).length} of ${results.length} checks passed${results.every(result => result.passed) ? "." : "; remaining failures are shown below."}`);
         }
 
         stage("Review Agent", "running", "Reviewing the final code and observed test outcomes.");
@@ -191,7 +194,8 @@ export async function POST(request: Request) {
         stage("Review Agent", "complete", "Final review is ready.");
 
         const passed = results.filter(result => result.passed).length;
-        const testTable = results.map(result => `| ${result.passed ? "Pass" : "Fail"} | ${result.name.replaceAll("|", "\\|")} | ${result.expected.replaceAll("|", "\\|")} | ${result.received.replaceAll("|", "\\|")} |`).join("\n");
+        const tableCell = (value: string) => value.replaceAll("|", "\\|").replace(/\r?\n/g, " ↵ ").replace(/\s{2,}/g, " ");
+        const testTable = results.map(result => `| ${result.passed ? "Pass" : "Fail"} | ${tableCell(result.name)} | ${tableCell(result.expected)} | ${tableCell(result.error ? `ERROR: ${result.error}` : result.received)} |`).join("\n");
         finalText = `### Requirement analysis\n${(spec.requirements || []).map(item => `- ${item}`).join("\n")}\n\n### Test results (${passed}/${results.length} passed)\n| Status | Test | Expected | Actual |\n|---|---|---|---|\n${testTable}\n\n### Review\n${review}\n\n${repairUsed ? "One repair attempt was used." : "No repair was needed."}\n\n### Python solution\n\`\`\`python\n${code}\n\`\`\``;
         const { error: saveError } = await admin.from("messages").insert({ conversation_id: conversationId, user_id: user.id, role: "assistant", content: finalText });
         if (saveError) throw new Error("The workflow completed, but its result could not be saved.");

@@ -18,11 +18,12 @@ SAFE_BUILTINS = {
     "print": print, "input": input, "int": int, "float": float,
     "str": str, "bool": bool, "len": len, "sum": sum, "min": min,
     "max": max, "range": range, "abs": abs, "round": round,
+    "sorted": sorted, "reversed": reversed,
     "enumerate": enumerate, "zip": zip, "list": list, "tuple": tuple,
     "set": set, "all": all, "any": any,
 }
 ALLOWED = (
-    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For,
+    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For, ast.Attribute,
     ast.Break, ast.Continue, ast.Pass, ast.FunctionDef, ast.Return,
     ast.arguments, ast.arg, ast.Name, ast.Load, ast.Store, ast.Constant,
     ast.List, ast.Tuple, ast.Dict, ast.Set, ast.Subscript, ast.Slice,
@@ -32,6 +33,11 @@ ALLOWED = (
     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In,
     ast.NotIn, ast.Is, ast.IsNot, ast.ListComp, ast.comprehension,
 )
+SAFE_METHODS = {
+    "append", "copy", "count", "extend", "index", "insert", "join",
+    "lower", "lstrip", "pop", "remove", "replace", "reverse", "rstrip",
+    "sort", "split", "splitlines", "startswith", "strip", "upper",
+}
 
 def apply_limits():
     def limit_soft(resource_id, target):
@@ -68,8 +74,12 @@ def run(source, input_text):
             if not isinstance(node, ALLOWED):
                 raise ValueError(f"Blocked Python construct: {type(node).__name__}.")
             if isinstance(node, ast.Call):
-                if not isinstance(node.func, ast.Name) or node.func.id not in SAFE_BUILTINS and node.func.id not in functions:
+                is_safe_name = isinstance(node.func, ast.Name) and (node.func.id in SAFE_BUILTINS or node.func.id in functions)
+                is_safe_method = isinstance(node.func, ast.Attribute) and node.func.attr in SAFE_METHODS
+                if not is_safe_name and not is_safe_method:
                     raise ValueError("Only basic built-ins and functions defined in this file may be called.")
+            if isinstance(node, ast.Attribute) and node.attr not in SAFE_METHODS:
+                raise ValueError("Only approved string and list methods may be accessed.")
             if isinstance(node, ast.Name) and node.id.startswith("__"):
                 raise ValueError("Names beginning with double underscores are blocked.")
         safe_globals = {"__builtins__": SAFE_BUILTINS}

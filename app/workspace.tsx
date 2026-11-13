@@ -28,6 +28,8 @@ export function ChatWorkspace({ email }: { email: string }) {
   const [filter, setFilter] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const messagesRevision = useRef(0);
+  const skipInitialLoadIds = useRef(new Set<string>());
 
   const loadConversations = useCallback(async () => {
     const response = await fetch("/api/conversations", { cache: "no-store" });
@@ -41,11 +43,16 @@ export function ChatWorkspace({ email }: { email: string }) {
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
   useEffect(() => {
     if (!activeId) return;
+    if (skipInitialLoadIds.current.has(activeId)) {
+      setLoadedId(activeId);
+      return;
+    }
     let cancelled = false;
+    const revisionAtRequest = messagesRevision.current;
     fetch(`/api/conversations/${activeId}/messages`, { cache: "no-store" })
       .then(async response => { const body = await response.json(); if (!response.ok) throw new Error(body.error || "Could not open conversation."); return body.messages as Message[]; })
-      .then(rows => { if (!cancelled) { setMessages(rows); setLoadedId(activeId); setAgentEvents([]); } })
-      .catch(err => { if (!cancelled) { setMessages([]); setLoadedId(activeId); setNotice(err.message); } });
+      .then(rows => { if (!cancelled && revisionAtRequest === messagesRevision.current) { setMessages(rows); setLoadedId(activeId); setAgentEvents([]); } })
+      .catch(err => { if (!cancelled && revisionAtRequest === messagesRevision.current) { setMessages([]); setLoadedId(activeId); setNotice(err.message); } });
     return () => { cancelled = true; };
   }, [activeId]);
 
@@ -55,6 +62,7 @@ export function ChatWorkspace({ email }: { email: string }) {
       const response = await fetch("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not start a conversation.");
+      messagesRevision.current += 1;
       setConversations(items => [body.conversation, ...items]); setActiveId(body.conversation.id); setLoadedId(body.conversation.id); setMessages([]); setDraft("");
       inputRef.current?.focus();
     } catch (err) { setNotice(err instanceof Error ? err.message : "Could not start a conversation."); }
@@ -67,7 +75,7 @@ export function ChatWorkspace({ email }: { email: string }) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) { setNotice(body.error || "Could not delete the conversation."); return; }
     setConversations(items => items.filter(item => item.id !== conversation.id));
-    if (activeId === conversation.id) { setActiveId(null); setMessages([]); }
+    if (activeId === conversation.id) { messagesRevision.current += 1; skipInitialLoadIds.current.delete(conversation.id); setActiveId(null); setLoadedId(null); setMessages([]); }
   }
 
   async function submitMessage(event?: FormEvent) {
@@ -79,10 +87,13 @@ export function ChatWorkspace({ email }: { email: string }) {
       const response = await fetch("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       const body = await response.json();
       if (!response.ok) { setNotice(body.error || "Could not start a conversation."); return; }
-      conversationId = body.conversation.id; setActiveId(conversationId); setConversations(items => [body.conversation, ...items]);
+      const createdId: string = body.conversation.id;
+      conversationId = createdId; messagesRevision.current += 1; skipInitialLoadIds.current.add(createdId); setActiveId(createdId); setLoadedId(createdId); setConversations(items => [body.conversation, ...items]);
     }
+    setLoadedId(conversationId);
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: prompt, created_at: new Date().toISOString() };
     const assistantId = crypto.randomUUID();
+    messagesRevision.current += 1;
     setMessages(items => [...items, userMessage, { id: assistantId, role: "assistant", content: "", created_at: new Date().toISOString() }]);
     setDraft(""); setBusy(true); setNotice(""); setAgentEvents([]);
     try {
@@ -134,7 +145,7 @@ export function ChatWorkspace({ email }: { email: string }) {
       <div className="history-label">RECENT</div>
       <nav className="conversation-list" aria-label="Conversation history">
         {filtered.length === 0 ? <div className="empty-history">{filter ? "No matching conversations" : "Your conversations will appear here"}</div> : filtered.map(item => <div className={`conversation-row ${item.id === activeId ? "selected" : ""}`} key={item.id}>
-          <button className="conversation-select" onClick={() => { setNotice(""); setActiveId(item.id); setMenuId(null); if (window.innerWidth <= 560) setSidebarOpen(false); }}><span className="conversation-title">{item.title}</span></button>
+          <button className="conversation-select" onClick={() => { setNotice(""); if (item.id !== activeId) { messagesRevision.current += 1; skipInitialLoadIds.current.delete(item.id); setMessages([]); setLoadedId(null); setAgentEvents([]); setActiveId(item.id); } setMenuId(null); if (window.innerWidth <= 560) setSidebarOpen(false); }}><span className="conversation-title">{item.title}</span></button>
           <button className="icon-button row-menu" aria-label="Conversation options" onClick={() => setMenuId(menuId === item.id ? null : item.id)}><MoreHorizontal size={16} /></button>
           {menuId === item.id && <button className="delete-menu" onClick={e => void deleteConversation(e, item)}><Trash2 size={14} /> Delete</button>}
         </div>)}
