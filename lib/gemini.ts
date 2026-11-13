@@ -4,6 +4,13 @@ export type GeminiJsonSchema = Record<string, unknown>;
 class GeminiQuotaError extends Error {
   constructor(message: string) { super(message); this.name = "GeminiQuotaError"; }
 }
+class GeminiUnavailableError extends Error {
+  constructor(message: string) { super(message); this.name = "GeminiUnavailableError"; }
+}
+
+function canUseAlternateProvider(error: unknown) {
+  return error instanceof GeminiQuotaError || error instanceof GeminiUnavailableError;
+}
 
 export const CODEASSIST_INSTRUCTIONS = `You are CodeAssist, a careful programming assistant. Explain your reasoning clearly, provide correct and runnable code, mention important assumptions, and call out risks. Prefer concise answers. Never claim code was executed unless the restricted test runner actually ran it.`;
 
@@ -36,13 +43,19 @@ async function request(messages: GeminiMessage[], instructions: string, maxOutpu
   const body = JSON.stringify(requestBody(messages, instructions, maxOutputTokens, model, responseSchema));
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body,
-      signal: AbortSignal.timeout(90_000),
-      cache: "no-store",
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body,
+        signal: AbortSignal.timeout(90_000),
+        cache: "no-store",
+      });
+    } catch {
+      if (attempt < 2) { await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1))); continue; }
+      throw new GeminiUnavailableError("Gemini could not be reached. Trying the alternate model.");
+    }
     if (response.ok) return response;
 
     let payload: { error?: { message?: string; details?: Array<{ "@type"?: string; retryDelay?: string; violations?: Array<{ quotaId?: string; quotaMetric?: string }> }> } } = {};
@@ -73,46 +86,101 @@ async function request(messages: GeminiMessage[], instructions: string, maxOutpu
     if (response.status === 429) {
       throw new GeminiQuotaError("Gemini quota or rate limit reached for this project.");
     }
+    if ([500, 502, 503, 504].includes(response.status)) {
+      throw new GeminiUnavailableError("Gemini is temporarily unavailable. Trying the alternate model.");
+    }
     throw new Error(detail ? `Gemini request failed (${response.status}): ${detail}` : `Gemini request failed (${response.status}). Check the API key, model and quota.`);
   }
   throw new Error("Gemini is temporarily rate-limited. Please wait a moment and try again.");
 }
 
-function groqConfig() {
-  const apiKey = process.env.GROQ_API_KEY?.trim();
-  if (!apiKey) throw new Error("Gemini quota is exhausted and no fallback is configured. Add GROQ_API_KEY to enable the optional Groq fallback.");
-  const model = process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-20b";
-  if (!/^[a-zA-Z0-9._/-]+$/.test(model)) throw new Error("GROQ_MODEL contains invalid characters.");
-  return { apiKey, model };
+type AlternateProvider = { label: string; apiKey: string; model: string; baseUrl: string; maxTokensField: "max_tokens" | "max_completion_tokens" };
+
+function alternateProviders(): AlternateProvider[] {
+  const providers: AlternateProvider[] = [];
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (groqKey) {
+    providers.push({
+      label: "Groq",
+      apiKey: groqKey,
+      model: process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-20b",
+      baseUrl: "https://api.groq.com/openai/v1",
+      maxTokensField: "max_completion_tokens",
+    });
+  }
+
+  for (let slot = 1; slot <= 4; slot += 1) {
+    const prefix = `AI_FALLBACK_${slot}`;
+    const apiKey = process.env[`${prefix}_API_KEY`]?.trim();
+    const model = process.env[`${prefix}_MODEL`]?.trim();
+    const baseUrl = process.env[`${prefix}_BASE_URL`]?.trim();
+    if (!apiKey && !model && !baseUrl) continue;
+    if (!apiKey || !model || !baseUrl) {
+      throw new Error(`${prefix} needs all three settings: API_KEY, MODEL and BASE_URL.`);
+    }
+    let parsedBaseUrl: URL;
+    try { parsedBaseUrl = new URL(baseUrl); }
+    catch { throw new Error(`${prefix}_BASE_URL must be a valid HTTPS API URL.`); }
+    if (parsedBaseUrl.protocol !== "https:") throw new Error(`${prefix}_BASE_URL must use HTTPS.`);
+    if (!/^[a-zA-Z0-9._/-]+$/.test(model)) throw new Error(`${prefix}_MODEL contains invalid characters.`);
+    providers.push({ label: `Alternate model ${slot}`, apiKey, model, baseUrl: baseUrl.replace(/\/+$/, ""), maxTokensField: "max_tokens" });
+  }
+
+  const uniqueHosts = new Set<string>();
+  for (const provider of providers) {
+    const host = new URL(provider.baseUrl).host.toLowerCase();
+    if (uniqueHosts.has(host)) throw new Error("Configure each fallback slot for a different AI provider endpoint.");
+    uniqueHosts.add(host);
+  }
+  return providers;
 }
 
-function groqMessages(messages: GeminiMessage[], instructions: string, responseSchema?: GeminiJsonSchema) {
-  const normalizeSchema = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(normalizeSchema);
-    if (!value || typeof value !== "object") return value;
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-      key,
-      key === "type" && typeof item === "string" ? item.toLowerCase() : normalizeSchema(item),
-    ]));
-  };
-  const schemaHint = responseSchema ? `\nReturn a JSON object matching this JSON Schema exactly:\n${JSON.stringify(normalizeSchema(responseSchema))}` : "";
+function groqSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(groqSchema);
+  if (!value || typeof value !== "object") return value;
+  const normalized = Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    key === "type" && typeof item === "string" ? item.toLowerCase() : groqSchema(item),
+  ])) as Record<string, unknown>;
+  if (normalized.type === "object") {
+    const properties = normalized.properties && typeof normalized.properties === "object"
+      ? normalized.properties as Record<string, unknown>
+      : {};
+    normalized.required = Array.isArray(normalized.required)
+      ? Array.from(new Set([...normalized.required, ...Object.keys(properties)]))
+      : Object.keys(properties);
+    normalized.additionalProperties = false;
+  }
+  return normalized;
+}
+
+function groqMessages(messages: GeminiMessage[], instructions: string, hasStructuredResponse = false) {
+  const schemaHint = hasStructuredResponse ? " Return only the JSON object requested by the structured response format, with no Markdown." : "";
   return [
     { role: "system", content: `${instructions}${schemaHint}` },
     ...messages.map(message => ({ role: message.role === "model" ? "assistant" : "user", content: message.text })),
   ];
 }
 
-async function requestGroq(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
-  const { apiKey, model } = groqConfig();
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+async function requestAlternate(provider: AlternateProvider, messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
+  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
     body: JSON.stringify({
-      model,
-      messages: groqMessages(messages, instructions, responseSchema),
-      max_completion_tokens: maxOutputTokens,
+      model: provider.model,
+      messages: groqMessages(messages, instructions, Boolean(responseSchema)),
+      [provider.maxTokensField]: maxOutputTokens,
       temperature: responseSchema ? 0.1 : 0.3,
-      ...(responseSchema ? { response_format: { type: "json_object" } } : {}),
+      ...(responseSchema ? {
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "codeassist_response",
+            strict: true,
+            schema: groqSchema(responseSchema),
+          },
+        },
+      } : {}),
       ...(streaming ? { stream: true } : {}),
     }),
     signal: AbortSignal.timeout(90_000),
@@ -120,11 +188,26 @@ async function requestGroq(messages: GeminiMessage[], instructions: string, maxO
   });
   if (response.ok) return response;
   let detail = "";
+  let failedGeneration = false;
   try {
-    const payload = await response.json() as { error?: { message?: string } };
+    const payload = await response.json() as { error?: { message?: string; failed_generation?: unknown } };
     detail = payload.error?.message?.slice(0, 240) || "";
+    failedGeneration = payload.error?.failed_generation !== undefined;
   } catch { /* provider error body is optional */ }
-  throw new Error(detail ? `Groq fallback failed (${response.status}): ${detail}` : `Groq fallback failed (${response.status}). Check GROQ_API_KEY, GROQ_MODEL and Groq limits.`);
+  if (failedGeneration) throw new Error(`${provider.label} rejected the structured response. Confirm this model supports strict JSON Schema output.`);
+  throw new Error(detail ? `${provider.label} request failed (${response.status}): ${detail}` : `${provider.label} request failed (${response.status}). Check its key, model and usage limits.`);
+}
+
+async function requestAlternateChain(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, streaming: boolean, responseSchema?: GeminiJsonSchema) {
+  const providers = alternateProviders();
+  if (!providers.length) throw new Error("Gemini is unavailable and no alternate AI provider is configured. Add a fallback API key, model and base URL in the server environment.");
+
+  const failures: string[] = [];
+  for (const provider of providers) {
+    try { return await requestAlternate(provider, messages, instructions, maxOutputTokens, streaming, responseSchema); }
+    catch (error) { failures.push(error instanceof Error ? error.message : `${provider.label} request failed.`); }
+  }
+  throw new Error(`Gemini is unavailable, and all configured alternate models failed. ${failures.join(" | ")}`);
 }
 
 function textFromCandidate(payload: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }> }) {
@@ -136,8 +219,8 @@ export async function generateGeminiText(instructions: string, prompt: string, m
   try {
     response = await request([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema);
   } catch (error) {
-    if (!(error instanceof GeminiQuotaError)) throw error;
-    response = await requestGroq([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema);
+    if (!canUseAlternateProvider(error)) throw error;
+    response = await requestAlternateChain([{ role: "user", text: prompt }], instructions, maxOutputTokens, false, responseSchema);
   }
   const payload = await response.json() as Parameters<typeof textFromCandidate>[0];
   const text = ("candidates" in payload
@@ -149,13 +232,13 @@ export async function generateGeminiText(instructions: string, prompt: string, m
 
 export async function streamGeminiText(messages: GeminiMessage[], instructions: string, maxOutputTokens: number, onText: (text: string) => void) {
   let response: Response;
-  let provider: "gemini" | "groq" = "gemini";
+  let provider: "gemini" | "alternate" = "gemini";
   try {
     response = await request(messages, instructions, maxOutputTokens, true);
   } catch (error) {
-    if (!(error instanceof GeminiQuotaError)) throw error;
-    response = await requestGroq(messages, instructions, maxOutputTokens, true);
-    provider = "groq";
+    if (!canUseAlternateProvider(error)) throw error;
+    response = await requestAlternateChain(messages, instructions, maxOutputTokens, true);
+    provider = "alternate";
   }
   if (!response.body) throw new Error("Gemini did not return a response stream.");
   const reader = response.body.getReader();
