@@ -27,7 +27,7 @@ SAFE_BUILTINS = {
     "ZeroDivisionError": ZeroDivisionError, "RuntimeError": RuntimeError,
 }
 ALLOWED = (
-    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For, ast.Try,
+    ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.If, ast.For, ast.While, ast.Try,
     ast.ExceptHandler, ast.Raise, ast.Attribute,
     ast.Break, ast.Continue, ast.Pass, ast.FunctionDef, ast.Return,
     ast.arguments, ast.arg, ast.Name, ast.Load, ast.Store, ast.Constant,
@@ -39,7 +39,7 @@ ALLOWED = (
     ast.NotIn, ast.Is, ast.IsNot, ast.ListComp, ast.comprehension,
 )
 SAFE_METHODS = {
-    "append", "copy", "count", "extend", "index", "insert", "join",
+    "add", "append", "copy", "count", "extend", "index", "insert", "join",
     "lower", "lstrip", "pop", "remove", "replace", "reverse", "rstrip",
     "sort", "split", "splitlines", "startswith", "strip", "upper",
 }
