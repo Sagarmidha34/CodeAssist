@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowUp, Check, Code2, Copy, FileCode2, GitBranch, Menu, MessageSquarePlus, MoreHorizontal, PanelLeftClose, Plus, Search, ShieldCheck, Sparkles, TerminalSquare, Trash2, X } from "lucide-react";
+import { ArrowUp, Check, Code2, Copy, FileCode2, GitBranch, LogOut, Menu, MessageSquarePlus, MoreHorizontal, PanelLeftClose, Plus, Search, ShieldCheck, Sparkles, TerminalSquare, Trash2, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 type Conversation = { id: string; title: string; updated_at: string };
@@ -25,6 +25,8 @@ export function ChatWorkspace({ email }: { email: string }) {
   const [notice, setNotice] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -41,6 +43,20 @@ export function ChatWorkspace({ email }: { email: string }) {
 
   useEffect(() => { void Promise.resolve().then(loadConversations).catch(err => setNotice(err.message)); }, [loadConversations]);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    function closeAccountMenu(event: MouseEvent) {
+      if (event.target instanceof Node && !accountMenuRef.current?.contains(event.target)) setAccountMenuOpen(false);
+    }
+    function closeOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeAccountMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeAccountMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
   useEffect(() => {
     if (!activeId) return;
     if (skipInitialLoadIds.current.has(activeId)) {
@@ -131,6 +147,7 @@ export function ChatWorkspace({ email }: { email: string }) {
   }
 
   async function signOut() {
+    setAccountMenuOpen(false);
     const supabase = createClient(); await supabase.auth.signOut(); router.replace("/login"); router.refresh();
   }
 
@@ -150,7 +167,7 @@ export function ChatWorkspace({ email }: { email: string }) {
           {menuId === item.id && <button className="delete-menu" onClick={e => void deleteConversation(e, item)}><Trash2 size={14} /> Delete</button>}
         </div>)}
       </nav>
-      <div className="side-bottom"><div className="account-row"><span className="avatar">{email.charAt(0).toUpperCase()}</span><span className="account-email" title={email}>{email}</span><button className="icon-button" title="Sign out" onClick={signOut}><MoreHorizontal size={17} /></button></div><div className="private-note"><ShieldCheck size={13} /> Your chats are private to your account</div></div>
+      <div className="side-bottom"><div className="account-row"><span className="avatar">{email.charAt(0).toUpperCase()}</span><span className="account-email" title={email}>{email}</span><div className="account-menu-wrap" ref={accountMenuRef}><button className="icon-button" title="Account menu" aria-label="Open account menu" aria-haspopup="menu" aria-expanded={accountMenuOpen} onClick={() => setAccountMenuOpen(open => !open)}><MoreHorizontal size={17} /></button>{accountMenuOpen && <div className="account-menu" role="menu" aria-label="Account options"><div className="account-menu-heading">Signed in as<span title={email}>{email}</span></div><Link href="/privacy" role="menuitem" onClick={() => setAccountMenuOpen(false)}><FileCode2 size={14} /> Privacy policy</Link><Link href="/terms" role="menuitem" onClick={() => setAccountMenuOpen(false)}><FileCode2 size={14} /> Terms of service</Link><div className="account-menu-divider" /><button role="menuitem" onClick={() => void signOut()}><LogOut size={14} /> Sign out</button></div>}</div></div><div className="private-note"><ShieldCheck size={13} /> Your chats are private to your account</div></div>
     </aside>}
     <section className="chat-shell">
       <header className="chat-topbar">{!sidebarOpen && <button className="icon-button show-sidebar" title="Show sidebar" onClick={() => setSidebarOpen(true)}><Menu size={18} /></button>}<div className="top-title"><strong>{activeConversation?.title || "CodeAssist"}</strong><span><Sparkles size={12} /> AI coding assistant</span></div><div className="top-right"><div className="mode-switch" role="tablist" aria-label="Assistant mode"><button role="tab" aria-selected={mode === "chat"} className={mode === "chat" ? "active" : ""} onClick={() => setMode("chat")}>Chat</button><button role="tab" aria-selected={mode === "agents"} className={mode === "agents" ? "active" : ""} onClick={() => setMode("agents")}><GitBranch size={12} /> Agents</button></div><span className="model-pill"><span /> Gemini + fallback</span><div className="account-mobile">{email.split("@")[0]}</div></div></header>

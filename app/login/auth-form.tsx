@@ -125,6 +125,7 @@ export function AuthForm({ configured, confirmationError = false, initialMode = 
       </>}
       <div className="auth-divider"><span /> <span>BUILT FOR THE WAY YOU THINK</span> <span /></div>
       <p className="auth-footnote">Your conversations are saved to your account. AI responses use the configured server-side provider.</p>
+      <p className="auth-legal-links"><Link href="/privacy">Privacy policy</Link><span>·</span><Link href="/terms">Terms of service</Link></p>
     </section>
     <div className="auth-bottom">CODEASSIST <span>·</span> A MULTI-AGENT AI CODING WORKSPACE</div>
   </main>;
